@@ -82,8 +82,16 @@ local function handleCertificate(id, type, body, ack)
 
         if request.server.challengeSolution == body then
             request.server.verified = true
+            -- generate own keyPair
+            local keyPair = rsa.generateKeypair()
+            request.client = {}
+            request.client.publicKey = keyPair.publicKey
+            request.client.privateKey = keyPair.privateKey
+
             -- send request if verified
-            rednet.send(id, "ccstl:request$&" .. request.body .. "$&" .. ack)
+            local res = request.body .. "---" .. textutils.serialise(request.client.publicKey)
+            res = rsa.encrypt(res, request.server.publicKey)
+            rednet.send(id, "ccstl:request$&" .. res .. "$&" .. ack)
             return
         end
 
@@ -126,7 +134,14 @@ local function handleRequest(id, type, body, ack)
         rednet.send(id, "ccstl:response:error:500$&Internal Server Error$&" .. ack)
         return
     end
-    request.body = body
+
+    body = rsa.decrypt(body, server.privateKey)
+    local data = body:split("---")
+    request.body = data[1]
+    if not request.client then request.client = {} end
+    -- I have no clue why its the 4th element but it is for whatever goddamn reason
+    -- FUCK YOU CC I SPENT SO MUCH TIME
+    request.client.publicKey = textutils.unserialise(data[4])
 
     function request:write(res, status_code, failed)
         expect(1, res, "string")
@@ -134,6 +149,8 @@ local function handleRequest(id, type, body, ack)
         expect(3, failed, "boolean", "nil")
 
         if not status_code then status_code = 200 end
+
+        res = rsa.encrypt(res, request.client.publicKey)
 
         if failed then
             rednet.send(self.id, "ccstl:response:error:" .. status_code .. "$&" .. res .. "$&" .. self.ack)
@@ -158,7 +175,7 @@ local function handleResponse(id, type, body, ack)
         return
     end
 
-    request.response = body
+    request.response = rsa.decrypt(body, request.client.privateKey)
 
     function request:write(res, status_code, failed)
         expect(1, res, "string")
@@ -166,6 +183,8 @@ local function handleResponse(id, type, body, ack)
         expect(3, failed, "boolean", "nil")
         
         if not status_code then status_code = 200 end
+
+        res = rsa.encrypt(res, request.client.publicKey)
 
         if failed then
             rednet.send(self.id, "ccstl:response:error:" .. status_code .. "$&" .. res .. "$&" .. self.ack)
@@ -201,6 +220,10 @@ function ccstl.createRequest(id, body, timeout)
             challenge = nil,
             challengeSolution = nil,
             verified = false
+        },
+        client = {
+            publicKey = nil,
+            privateKey = nil
         }
     }
 
